@@ -1,6 +1,8 @@
 $stdout.sync = true
 
 Huginn::Application.configure do
+  config.middleware.insert_after ActionDispatch::Static, Rack::LiveReload
+
   # Settings specified here will take precedence over those in config/application.rb
 
   # In the development environment your application's code is reloaded on
@@ -37,10 +39,18 @@ Huginn::Application.configure do
   # yet still be able to expire them through the digest params.
   config.assets.digest = true
 
+  # Adds additional error checking when serving assets at runtime.
+  # Checks for improperly declared sprockets dependencies.
+  # Raises helpful error messages.
+  config.assets.raise_runtime_errors = true
+
   config.action_mailer.default_url_options = { :host => ENV['DOMAIN'] }
   config.action_mailer.asset_host = ENV['DOMAIN']
-  config.action_mailer.perform_deliveries = ENV['SEND_EMAIL_IN_DEVELOPMENT'] == 'true'
   config.action_mailer.raise_delivery_errors = true
-  config.action_mailer.delivery_method = :smtp
+  if ENV['SEND_EMAIL_IN_DEVELOPMENT'] == 'true'
+    config.action_mailer.delivery_method = :smtp
+  else
+    config.action_mailer.delivery_method = :letter_opener_web
+  end
   # smtp_settings moved to config/initializers/action_mailer.rb
 end

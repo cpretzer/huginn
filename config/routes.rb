@@ -2,7 +2,7 @@ Huginn::Application.routes.draw do
   resources :agents do
     member do
       post :run
-      put :dry_run
+      post :dry_run
       post :handle_details_post
       put :leave_scenario
       delete :remove_events
@@ -48,7 +48,11 @@ Huginn::Application.routes.draw do
     resource :diagram, :only => [:show]
   end
 
-  resources :user_credentials, :except => :show
+  resources :user_credentials, :except => :show do
+    collection do
+      post :import
+    end
+  end
 
   resources :services, :only => [:index, :destroy] do
     member do
@@ -62,6 +66,17 @@ Huginn::Application.routes.draw do
     end
     collection do
       delete :destroy_failed
+      delete :destroy_all
+      post :retry_queued
+    end
+  end
+
+  namespace :admin do
+    resources :users, except: :show do
+      member do
+        put :deactivate
+        put :activate
+      end
     end
   end
 
@@ -72,8 +87,15 @@ Huginn::Application.routes.draw do
   post  "/users/:user_id/update_location/:secret" => "web_requests#update_location" # legacy
 
   devise_for :users,
-             controllers: { omniauth_callbacks: 'omniauth_callbacks' },
+             controllers: { 
+               omniauth_callbacks: 'omniauth_callbacks',
+               registrations: 'users/registrations'
+             },
              sign_out_via: [:post, :delete]
+  
+  if Rails.env.development?
+    mount LetterOpenerWeb::Engine, at: "/letter_opener"
+  end
 
   get "/about" => "home#about"
   root :to => "home#index"

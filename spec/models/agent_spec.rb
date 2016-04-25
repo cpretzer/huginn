@@ -1,7 +1,35 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe Agent do
   it_behaves_like WorkingHelpers
+
+  describe '.active/inactive' do
+    let(:agent) { agents(:jane_website_agent) }
+
+    it 'is active per default' do
+      expect(Agent.active).to include(agent)
+      expect(Agent.inactive).not_to include(agent)
+    end
+
+    it 'is not active when disabled' do
+      agent.update_attribute(:disabled, true)
+      expect(Agent.active).not_to include(agent)
+      expect(Agent.inactive).to include(agent)
+    end
+
+    it 'is not active when deactivated' do
+      agent.update_attribute(:deactivated, true)
+      expect(Agent.active).not_to include(agent)
+      expect(Agent.inactive).to include(agent)
+    end
+
+    it 'is not active when disabled and deactivated' do
+      agent.update_attribute(:disabled, true)
+      agent.update_attribute(:deactivated, true)
+      expect(Agent.active).not_to include(agent)
+      expect(Agent.inactive).to include(agent)
+    end
+  end
 
   describe ".bulk_check" do
     before do
@@ -15,6 +43,12 @@ describe Agent do
 
     it "should skip disabled Agents" do
       agents(:bob_weather_agent).update_attribute :disabled, true
+      mock(Agents::WeatherAgent).async_check(anything).times(@weather_agent_count - 1)
+      Agents::WeatherAgent.bulk_check("midnight")
+    end
+
+    it "should skip agents of deactivated accounts" do
+      agents(:bob_weather_agent).user.deactivate!
       mock(Agents::WeatherAgent).async_check(anything).times(@weather_agent_count - 1)
       Agents::WeatherAgent.bulk_check("midnight")
     end
@@ -223,7 +257,7 @@ describe Agent do
         mock(Agent).find(@checker.id) { @checker }
         expect {
           Agents::SomethingSource.async_check(@checker.id)
-        }.to raise_error
+        }.to raise_error(RuntimeError)
         log = @checker.logs.first
         expect(log.message).to match(/Exception/)
         expect(log.level).to eq(4)
@@ -263,7 +297,7 @@ describe Agent do
         Agent.async_check(agents(:bob_weather_agent).id)
         expect {
           Agent.async_receive(agents(:bob_rain_notifier_agent).id, [agents(:bob_weather_agent).events.last.id])
-        }.to raise_error
+        }.to raise_error(RuntimeError)
         log = agents(:bob_rain_notifier_agent).logs.first
         expect(log.message).to match(/Exception/)
         expect(log.level).to eq(4)
@@ -292,6 +326,14 @@ describe Agent do
         }
         Agent.async_check(agents(:bob_weather_agent).id)
         Agent.async_check(agents(:jane_weather_agent).id)
+        Agent.receive!
+      end
+
+      it "should call receive for each event when no_bulk_receive! is used" do
+        mock.any_instance_of(Agents::TriggerAgent).receive(anything).twice
+        stub(Agents::TriggerAgent).no_bulk_receive? { true }
+        Agent.async_check(agents(:bob_weather_agent).id)
+        Agent.async_check(agents(:bob_weather_agent).id)
         Agent.receive!
       end
 
@@ -326,6 +368,13 @@ describe Agent do
         expect {
           Agent.receive! # and we receive it
         }.to change { agents(:bob_rain_notifier_agent).reload.last_checked_event_id }
+      end
+
+      it "should not run agents of deactivated accounts" do
+        agents(:bob_weather_agent).user.deactivate!
+        Agent.async_check(agents(:bob_weather_agent).id)
+        mock(Agent).async_receive(agents(:bob_rain_notifier_agent).id, anything).times(0)
+        Agent.receive!
       end
     end
 
@@ -546,11 +595,11 @@ describe Agent do
         expect(agent).to have(1).errors_on(:keep_events_for)
         agent.keep_events_for = ""
         expect(agent).to have(1).errors_on(:keep_events_for)
-        agent.keep_events_for = 5
+        agent.keep_events_for = 5.days.to_i
         expect(agent).to be_valid
         agent.keep_events_for = 0
         expect(agent).to be_valid
-        agent.keep_events_for = 365
+        agent.keep_events_for = 365.days.to_i
         expect(agent).to be_valid
 
         # Rails seems to call to_i on the input. This guards against future changes to that behavior.
@@ -564,7 +613,7 @@ describe Agent do
         @time = "2014-01-01 01:00:00 +00:00"
         time_travel_to @time do
           @agent = Agents::SomethingSource.new(:name => "something")
-          @agent.keep_events_for = 5
+          @agent.keep_events_for = 5.days
           @agent.user = users(:bob)
           @agent.save!
           @event = @agent.create_event :payload => { "hello" => "world" }
@@ -580,7 +629,7 @@ describe Agent do
           @agent.save!
 
           @agent.options[:foo] = "bar1"
-          @agent.keep_events_for = 5
+          @agent.keep_events_for = 5.days
           @agent.save!
         end
       end
@@ -590,7 +639,7 @@ describe Agent do
           time_travel_to @time do
             expect {
                 @agent.options[:foo] = "bar1"
-                @agent.keep_events_for = 3
+                @agent.keep_events_for = 3.days
                 @agent.save!
             }.to change { @event.reload.expires_at }
             expect(@event.expires_at.to_i).to be_within(2).of(3.days.from_now.to_i)
@@ -603,7 +652,7 @@ describe Agent do
 
           expect {
             @agent.options[:foo] = "bar2"
-            @agent.keep_events_for = 3
+            @agent.keep_events_for = 3.days
             @agent.save!
           }.to change { @event.reload.expires_at }
           expect(@event.expires_at.to_i).to be_within(60 * 61).of(1.days.from_now.to_i) # The larger time is to deal with daylight savings
@@ -635,7 +684,7 @@ describe Agent do
         @receiver = Agents::CannotBeScheduled.new(
           name: 'Agent',
           options: { foo: 'bar3' },
-          keep_events_for: 3,
+          keep_events_for: 3.days,
           propagate_immediately: true)
         @receiver.user = users(:bob)
         @receiver.sources << @sender
@@ -687,8 +736,40 @@ describe Agent do
       end
 
       it "calls the .receive_web_request hook, updates last_web_request_at, and saves" do
-        @agent.trigger_web_request({ :some_param => "some_value" }, "post", "text/html")
+        request = ActionDispatch::Request.new({
+          'action_dispatch.request.request_parameters' => { :some_param => "some_value" },
+          'REQUEST_METHOD' => "POST",
+          'HTTP_ACCEPT' => 'text/html'
+        })
+
+        @agent.trigger_web_request(request)
         expect(@agent.reload.memory['last_request']).to eq([ { "some_param" => "some_value" }, "post", "text/html" ])
+        expect(@agent.last_web_request_at.to_i).to be_within(1).of(Time.now.to_i)
+      end
+    end
+
+    context "when .receive_web_request is defined with just request" do
+      before do
+        @agent = Agents::WebRequestReceiver.new(:name => "something")
+        @agent.user = users(:bob)
+        @agent.save!
+
+        def @agent.receive_web_request(request)
+          memory['last_request'] = [request.params, request.method_symbol.to_s, request.format, {'HTTP_X_CUSTOM_HEADER' => request.headers['HTTP_X_CUSTOM_HEADER']}]
+          ['Ok!', 200]
+        end
+      end
+
+      it "calls the .trigger_web_request with headers, and they get passed to .receive_web_request" do
+        request = ActionDispatch::Request.new({
+          'action_dispatch.request.request_parameters' => { :some_param => "some_value" },
+          'REQUEST_METHOD' => "POST",
+          'HTTP_ACCEPT' => 'text/html',
+          'HTTP_X_CUSTOM_HEADER' => "foo"
+        })
+
+        @agent.trigger_web_request(request)
+        expect(@agent.reload.memory['last_request']).to eq([ { "some_param" => "some_value" }, "post", "text/html", {'HTTP_X_CUSTOM_HEADER' => "foo"} ])
         expect(@agent.last_web_request_at.to_i).to be_within(1).of(Time.now.to_i)
       end
     end
@@ -706,8 +787,14 @@ describe Agent do
       end
 
       it "outputs a deprecation warning and calls .receive_webhook with the params" do
+        request = ActionDispatch::Request.new({
+          'action_dispatch.request.request_parameters' => { :some_param => "some_value" },
+          'REQUEST_METHOD' => "POST",
+          'HTTP_ACCEPT' => 'text/html'
+        })
+
         mock(Rails.logger).warn("DEPRECATED: The .receive_webhook method is deprecated, please switch your Agent to use .receive_web_request.")
-        @agent.trigger_web_request({ :some_param => "some_value" }, "post", "text/html")
+        @agent.trigger_web_request(request)
         expect(@agent.reload.memory['last_webhook_request']).to eq({ "some_param" => "some_value" })
         expect(@agent.last_web_request_at.to_i).to be_within(1).of(Time.now.to_i)
       end
@@ -747,7 +834,7 @@ describe Agent do
 
       it "sets expires_at on created events" do
         event = agents(:jane_weather_agent).create_event :payload => { 'hi' => 'there' }
-        expect(event.expires_at.to_i).to be_within(5).of(agents(:jane_weather_agent).keep_events_for.days.from_now.to_i)
+        expect(event.expires_at.to_i).to be_within(5).of(agents(:jane_weather_agent).keep_events_for.seconds.from_now.to_i)
       end
     end
 
@@ -836,7 +923,7 @@ describe AgentDrop do
         },
       },
       schedule: 'every_1h',
-      keep_events_for: 2)
+      keep_events_for: 2.days)
     @wsa1.user = users(:bob)
     @wsa1.save!
 
@@ -853,7 +940,7 @@ describe AgentDrop do
         },
       },
       schedule: 'every_12h',
-      keep_events_for: 2)
+      keep_events_for: 2.days)
     @wsa2.user = users(:bob)
     @wsa2.save!
 
@@ -868,7 +955,7 @@ describe AgentDrop do
         matchers: [],
         skip_created_at: 'false',
       },
-      keep_events_for: 2,
+      keep_events_for: 2.days,
       propagate_immediately: true)
     @efa.user = users(:bob)
     @efa.sources << @wsa1 << @wsa2

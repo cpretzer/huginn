@@ -1,4 +1,4 @@
-require 'spec_helper'
+require 'rails_helper'
 require 'nokogiri'
 
 describe LiquidInterpolatable::Filters do
@@ -35,6 +35,26 @@ describe LiquidInterpolatable::Filters do
       agent = Agents::InterpolatableAgent.new(name: "test", options: { 'foo' => '{{bar}' })
       expect(agent.valid?).to eq(false)
       expect(agent.errors[:options].first).to match(/not properly terminated/)
+    end
+  end
+
+  describe 'unescape' do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'should unescape basic HTML entities' do
+      agent.interpolation_context['something'] = '&#39;&lt;foo&gt; &amp; bar&#x27;'
+      agent.options['cleaned'] = '{{ something | unescape }}'
+      expect(agent.interpolated['cleaned']).to eq("'<foo> & bar'")
+    end
+  end
+
+  describe "json" do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'serializes data to json' do
+      agent.interpolation_context['something'] = {foo: 'bar'}
+      agent.options['cleaned'] = '{{ something | json }}'
+      expect(agent.interpolated['cleaned']).to eq('{"foo":"bar"}')
     end
   end
 
@@ -105,6 +125,8 @@ describe LiquidInterpolatable::Filters do
         to_return(status: 301, headers: { Location: 'http://tinyurl.com.x/cccc' })
       stub_request(:head, 'http://tinyurl.com.x/cccc').
         to_return(status: 301, headers: { Location: 'http://www.example.com/welcome' })
+      stub_request(:head, 'http://www.example.com/welcome').
+        to_return(status: 200)
 
       (1..5).each do |i|
         stub_request(:head, "http://2many.x/#{i}").
@@ -112,6 +134,18 @@ describe LiquidInterpolatable::Filters do
       end
       stub_request(:head, 'http://2many.x/6').
         to_return(status: 301, headers: { 'Content-Length' => '5' })
+    end
+
+    it 'should handle inaccessible URIs' do
+      expect(@filter.uri_expand(nil)).to eq('')
+      expect(@filter.uri_expand('')).to eq('')
+      expect(@filter.uri_expand(5)).to eq('5')
+      expect(@filter.uri_expand([])).to eq('[]')
+      expect(@filter.uri_expand({})).to eq('{}')
+      expect(@filter.uri_expand(URI('/'))).to eq('/')
+      expect(@filter.uri_expand(URI('http:google.com'))).to eq('http:google.com')
+      expect(@filter.uri_expand(URI('http:/google.com'))).to eq('http:/google.com')
+      expect(@filter.uri_expand(URI('ftp://ftp.freebsd.org/pub/FreeBSD/README.TXT'))).to eq('ftp://ftp.freebsd.org/pub/FreeBSD/README.TXT')
     end
 
     it 'should follow redirects' do
@@ -162,6 +196,72 @@ describe LiquidInterpolatable::Filters do
         @agent.options['long_url'] = '{{ short_url | uri_expand:6 }}'
         expect(@agent.interpolated['long_url']).to eq('http://2many.x/6')
       end
+    end
+  end
+
+  describe 'regex_replace_first' do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'should replace the first occurrence of a string using regex' do
+      agent.interpolation_context['something'] = 'foobar foobar'
+      agent.options['cleaned'] = '{{ something | regex_replace_first: "\S+bar", "foobaz"  }}'
+      expect(agent.interpolated['cleaned']).to eq('foobaz foobar')
+    end
+
+    it 'should support escaped characters' do
+      agent.interpolation_context['something'] = "foo\\1\n\nfoo\\bar\n\nfoo\\baz"
+      agent.options['test'] = "{{ something | regex_replace_first: '\\\\(\\w{2,})', '\\1\\\\' | regex_replace_first: '\\n+', '\\n'  }}"
+      expect(agent.interpolated['test']).to eq("foo\\1\nfoobar\\\n\nfoo\\baz")
+    end
+  end
+
+  describe 'regex_replace' do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'should replace the all occurrences of a string using regex' do
+      agent.interpolation_context['something'] = 'foobar foobar'
+      agent.options['cleaned'] = '{{ something | regex_replace: "\S+bar", "foobaz"  }}'
+      expect(agent.interpolated['cleaned']).to eq('foobaz foobaz')
+    end
+
+    it 'should support escaped characters' do
+      agent.interpolation_context['something'] = "foo\\1\n\nfoo\\bar\n\nfoo\\baz"
+      agent.options['test'] = "{{ something | regex_replace: '\\\\(\\w{2,})', '\\1\\\\' | regex_replace: '\\n+', '\\n'  }}"
+      expect(agent.interpolated['test']).to eq("foo\\1\nfoobar\\\nfoobaz\\")
+    end
+  end
+
+  describe 'regex_replace_first block' do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'should replace the first occurrence of a string using regex' do
+      agent.interpolation_context['something'] = 'foobar zoobar'
+      agent.options['cleaned'] = '{% regex_replace_first "(?<word>\S+)(?<suffix>bar)" in %}{{ something }}{% with %}{{ word | upcase }}{{ suffix }}{% endregex_replace_first %}'
+      expect(agent.interpolated['cleaned']).to eq('FOObar zoobar')
+    end
+
+    it 'should be able to take a pattern in a variable' do
+      agent.interpolation_context['something'] = 'foobar zoobar'
+      agent.interpolation_context['pattern'] = "(?<word>\\S+)(?<suffix>bar)"
+      agent.options['cleaned'] = '{% regex_replace_first pattern in %}{{ something }}{% with %}{{ word | upcase }}{{ suffix }}{% endregex_replace_first %}'
+      expect(agent.interpolated['cleaned']).to eq('FOObar zoobar')
+    end
+
+    it 'should define a variable named "match" in a "with" block' do
+      agent.interpolation_context['something'] = 'foobar zoobar'
+      agent.interpolation_context['pattern'] = "(?<word>\\S+)(?<suffix>bar)"
+      agent.options['cleaned'] = '{% regex_replace_first pattern in %}{{ something }}{% with %}{{ match.word | upcase }}{{ match["suffix"] }}{% endregex_replace_first %}'
+      expect(agent.interpolated['cleaned']).to eq('FOObar zoobar')
+    end
+  end
+
+  describe 'regex_replace block' do
+    let(:agent) { Agents::InterpolatableAgent.new(name: "test") }
+
+    it 'should replace the all occurrences of a string using regex' do
+      agent.interpolation_context['something'] = 'foobar zoobar'
+      agent.options['cleaned'] = '{% regex_replace "(?<word>\S+)(?<suffix>bar)" in %}{{ something }}{% with %}{{ word | upcase }}{{ suffix }}{% endregex_replace %}'
+      expect(agent.interpolated['cleaned']).to eq('FOObar ZOObar')
     end
   end
 end

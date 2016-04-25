@@ -5,7 +5,7 @@ module Agents
     cannot_create_events!
 
     description <<-MD
-      This agent is triggered by schedule or an incoming event and commands other agents ("targets") to run, disable, configure, or enable themselves.
+      The Commander Agent is triggered by schedule or an incoming event, and commands other agents ("targets") to run, disable, configure, or enable themselves.
 
       # Action types
 
@@ -36,7 +36,7 @@ module Agents
       true
     end
 
-    def check!
+    def check
       control!
     end
 

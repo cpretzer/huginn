@@ -6,6 +6,8 @@ module Agents
     include WebRequestConcern
 
     can_dry_run!
+    can_order_created_events!
+    no_bulk_receive!
 
     default_schedule "every_12h"
 
@@ -13,13 +15,17 @@ module Agents
     UNIQUENESS_FACTOR = 3
 
     description <<-MD
-      The WebsiteAgent scrapes a website, XML document, or JSON feed and creates Events based on the results.
+      The Website Agent scrapes a website, XML document, or JSON feed and creates Events based on the results.
 
-      Specify a `url` and select a `mode` for when to create Events based on the scraped data, either `all` or `on_change`.
+      Specify a `url` and select a `mode` for when to create Events based on the scraped data, either `all`, `on_change`, or `merge` (if fetching based on an Event, see below).
 
-      `url` can be a single url, or an array of urls (for example, for multiple pages with the exact same structure but different content to scrape)
+      The `url` option can be a single url, or an array of urls (for example, for multiple pages with the exact same structure but different content to scrape).
 
-      The WebsiteAgent can also scrape based on incoming events. It will scrape the url contained in the `url` key of the incoming event payload, or if you set `url_from_event` it is used as a Liquid template to generate the url to access. If you specify `merge` as the `mode`, it will retain the old payload and update it with the new values.
+      The WebsiteAgent can also scrape based on incoming events.
+
+      * Set the `url_from_event` option to a Liquid template to generate the url to access based on the Event.  (To fetch the url in the Event's `url` key, for example, set `url_from_event` to `{{ url }}`.)
+      * Alternatively, set `data_from_event` to a Liquid template to use data directly without fetching any URL.  (For example, set it to `{{ html }}` to use HTML contained in the `html` key of the incoming Event.)
+      * If you specify `merge` for the `mode` option, Huginn will retain the old payload and update it with new values.
 
       # Supported Document Types
 
@@ -31,7 +37,7 @@ module Agents
 
       # Scraping HTML and XML
 
-      When parsing HTML or XML, these sub-hashes specify how each extraction should be done.  The Agent first selects a node set from the document for each extraction key by evaluating either a CSS selector in `css` or an XPath expression in `xpath`.  It then evaluates an XPath expression in `value` on each node in the node set, converting the result into string.  Here's an example:
+      When parsing HTML or XML, these sub-hashes specify how each extraction should be done.  The Agent first selects a node set from the document for each extraction key by evaluating either a CSS selector in `css` or an XPath expression in `xpath`.  It then evaluates an XPath expression in `value` (default: `.`) on each node in the node set, converting the result into a string.  Here's an example:
 
           "extract": {
             "url": { "css": "#comic img", "value": "@src" },
@@ -39,11 +45,11 @@ module Agents
             "body_text": { "css": "div.main", "value": ".//text()" }
           }
 
-      "@_attr_" is the XPath expression to extract the value of an attribute named _attr_ from a node, and ".//text()" is to extract all the enclosed texts. To extract the innerHTML, use "./node()"; and to extract the outer HTML, use  ".". 
+      "@_attr_" is the XPath expression to extract the value of an attribute named _attr_ from a node, and `.//text()` extracts all the enclosed text. To extract the innerHTML, use `./node()`; and to extract the outer HTML, use  `.`.
 
-      You can also use [XPath functions](http://www.w3.org/TR/xpath/#section-String-Functions) like `normalize-space` to strip and squeeze whitespace, `substring-after` to extract part of a text, and `translate` to remove comma from a formatted number, etc.  Note that these functions take a string, not a node set, so what you may think would be written as `normalize-space(.//text())` should actually be `normalize-space(.)`.
+      You can also use [XPath functions](http://www.w3.org/TR/xpath/#section-String-Functions) like `normalize-space` to strip and squeeze whitespace, `substring-after` to extract part of a text, and `translate` to remove commas from formatted numbers, etc.  Note that these functions take a string, not a node set, so what you may think would be written as `normalize-space(.//text())` should actually be `normalize-space(.)`.
 
-      Beware that when parsing an XML document (i.e. `type` is `xml`) using `xpath` expressions all namespaces are stripped from the document unless a toplevel option `use_namespaces` is set to true.
+      Beware that when parsing an XML document (i.e. `type` is `xml`) using `xpath` expressions, all namespaces are stripped from the document unless the top-level option `use_namespaces` is set to `true`.
 
       # Scraping JSON
 
@@ -53,6 +59,8 @@ module Agents
             "title": { "path": "results.data[*].title" },
             "description": { "path": "results.data[*].description" }
           }
+
+      The `extract` option can be skipped for the JSON type, causing the full JSON response to be returned.
 
       # Scraping Text
 
@@ -86,7 +94,7 @@ module Agents
 
       Set `uniqueness_look_back` to limit the number of events checked for uniqueness (typically for performance).  This defaults to the larger of #{UNIQUENESS_LOOK_BACK} or #{UNIQUENESS_FACTOR}x the number of detected received results.
 
-      Set `force_encoding` to an encoding name if the website does not return a Content-Type header with a proper charset.
+      Set `force_encoding` to an encoding name if the website is known to respond with a missing, invalid, or wrong charset in the Content-Type header.  Note that a text content without a charset is taken as encoded in UTF-8 (not ISO-8859-1).
 
       Set `user_agent` to a custom User-Agent name if the website does not like the default value (`#{default_user_agent}`).
 
@@ -95,6 +103,8 @@ module Agents
       Set `disable_ssl_verification` to `true` to disable ssl verification.
 
       Set `unzip` to `gzip` to inflate the resource using gzip.
+
+      Set `http_success_codes` to an array of status codes (e.g., `[404, 422]`) to treat HTTP response codes beyond 200 as successes.
 
       # Liquid Templating
 
@@ -105,6 +115,10 @@ module Agents
           * `status`: HTTP status as integer. (Almost always 200)
 
           * `headers`: Response headers; for example, `{{ _response_.headers.Content-Type }}` expands to the value of the Content-Type header.  Keys are insensitive to cases and -/_.
+
+      # Ordering Events
+
+      #{description_events_order}
     MD
 
     event_description do
@@ -116,7 +130,7 @@ module Agents
     end
 
     def working?
-      event_created_within?(interpolated['expected_update_period_in_days']) && !recent_error_logs?
+      event_created_within?(options['expected_update_period_in_days']) && !recent_error_logs?
     end
 
     def default_options
@@ -135,11 +149,10 @@ module Agents
 
     def validate_options
       # Check for required fields
-      errors.add(:base, "either url or url_from_event is required") unless options['url'].present? || options['url_from_event'].present?
+      errors.add(:base, "either url, url_from_event, or data_from_event are required") unless options['url'].present? || options['url_from_event'].present? || options['data_from_event'].present?
       errors.add(:base, "expected_update_period_in_days is required") unless options['expected_update_period_in_days'].present?
-      if !options['extract'].present? && extraction_type != "json"
-        errors.add(:base, "extract is required for all types except json")
-      end
+      validate_extract_options!
+      validate_http_success_codes!
 
       # Check for optional fields
       if options['mode'].present?
@@ -154,28 +167,112 @@ module Agents
         errors.add(:base, "Invalid uniqueness_look_back format") unless is_positive_integer?(options['uniqueness_look_back'])
       end
 
-      if (encoding = options['force_encoding']).present?
-        case encoding
-        when String
-          begin
-            Encoding.find(encoding)
-          rescue ArgumentError
-            errors.add(:base, "Unknown encoding: #{encoding.inspect}")
-          end
-        else
-          errors.add(:base, "force_encoding must be a string")
-        end
-      end
-
       validate_web_request_options!
-      validate_extract_options!
+    end
+
+    def validate_http_success_codes!
+      consider_success = options["http_success_codes"]
+      if consider_success.present?
+
+        if (consider_success.class != Array)
+          errors.add(:http_success_codes, "must be an array and specify at least one status code")
+        else
+          if consider_success.uniq.count != consider_success.count
+            errors.add(:http_success_codes, "duplicate http code found")
+          else
+            if consider_success.any?{|e| e.to_s !~ /^\d+$/ }
+              errors.add(:http_success_codes, "please make sure to use only numeric values for code, ex 404, or \"404\"")
+            end
+          end
+        end
+
+      end
     end
 
     def validate_extract_options!
-      if extraction_type == "json" && interpolated['extract'].is_a?(Hash)
-        unless interpolated['extract'].all? { |name, details| details.is_a?(Hash) && details['path'].present? }
-          errors.add(:base, 'When type is json, all extractions must have a path attribute.')
+      extraction_type = (extraction_type() rescue extraction_type(options))
+      case extract = options['extract']
+      when Hash
+        if extract.each_value.any? { |value| !value.is_a?(Hash) }
+          errors.add(:base, 'extract must be a hash of hashes.')
+        else
+          case extraction_type
+          when 'html', 'xml'
+            extract.each do |name, details|
+              case details['css']
+              when String
+                # ok
+              when nil
+                case details['xpath']
+                when String
+                  # ok
+                when nil
+                  errors.add(:base, "When type is html or xml, all extractions must have a css or xpath attribute (bad extraction details for #{name.inspect})")
+                else
+                  errors.add(:base, "Wrong type of \"xpath\" value in extraction details for #{name.inspect}")
+                end
+              else
+                errors.add(:base, "Wrong type of \"css\" value in extraction details for #{name.inspect}")
+              end
+
+              case details['value']
+              when String, nil
+                # ok
+              else
+                errors.add(:base, "Wrong type of \"value\" value in extraction details for #{name.inspect}")
+              end
+            end
+          when 'json'
+            extract.each do |name, details|
+              case details['path']
+              when String
+                # ok
+              when nil
+                errors.add(:base, "When type is json, all extractions must have a path attribute (bad extraction details for #{name.inspect})")
+              else
+                errors.add(:base, "Wrong type of \"path\" value in extraction details for #{name.inspect}")
+              end
+            end
+          when 'text'
+            extract.each do |name, details|
+              case regexp = details['regexp']
+              when String
+                begin
+                  re = Regexp.new(regexp)
+                rescue => e
+                  errors.add(:base, "invalid regexp for #{name.inspect}: #{e.message}")
+                end
+              when nil
+                errors.add(:base, "When type is text, all extractions must have a regexp attribute (bad extraction details for #{name.inspect})")
+              else
+                errors.add(:base, "Wrong type of \"regexp\" value in extraction details for #{name.inspect}")
+              end
+
+              case index = details['index']
+              when Integer, /\A\d+\z/
+                # ok
+              when String
+                if re && !re.names.include?(index)
+                  errors.add(:base, "no named capture #{index.inspect} found in regexp for #{name.inspect})")
+                end
+              when nil
+                errors.add(:base, "When type is text, all extractions must have an index attribute (bad extraction details for #{name.inspect})")
+              else
+                errors.add(:base, "Wrong type of \"index\" value in extraction details for #{name.inspect}")
+              end
+            end
+          when /\{/
+            # Liquid templating
+          else
+            errors.add(:base, "Unknown extraction type #{extraction_type.inspect}")
+          end
         end
+      when nil
+        unless extraction_type == 'json'
+          errors.add(:base, 'extract is required for all types except json')
+        end
+      else
+        errors.add(:base, 'extract must be a hash')
       end
     end
 
@@ -183,94 +280,115 @@ module Agents
       check_urls(interpolated['url'])
     end
 
-    def check_urls(in_url)
+    def check_urls(in_url, existing_payload = {})
       return unless in_url.present?
 
       Array(in_url).each do |url|
-        check_url(url)
+        check_url(url, existing_payload)
       end
     end
 
-    def check_url(url, payload = {})
+    def check_url(url, existing_payload = {})
       unless /\Ahttps?:\/\//i === url
         error "Ignoring a non-HTTP url: #{url.inspect}"
         return
       end
-      log "Fetching #{url}"
-      response = faraday.get(url)
-      raise "Failed: #{response.inspect}" unless response.success?
+      uri = Utils.normalize_uri(url)
+      log "Fetching #{uri}"
+      response = faraday.get(uri)
+
+      raise "Failed: #{response.inspect}" unless consider_response_successful?(response)
 
       interpolation_context.stack {
         interpolation_context['_response_'] = ResponseDrop.new(response)
-        body = response.body
-        if (encoding = interpolated['force_encoding']).present?
-          body = body.encode(Encoding::UTF_8, encoding)
-        end
-        if interpolated['unzip'] == "gzip"
-          body = ActiveSupport::Gzip.decompress(body)
-        end
-        doc = parse(body)
+        handle_data(response.body, response.env[:url], existing_payload)
+      }
+    rescue => e
+      error "Error when fetching url: #{e.message}\n#{e.backtrace.join("\n")}"
+    end
 
-        if extract_full_json?
-          if store_payload!(previous_payloads(1), doc)
-            log "Storing new result for '#{name}': #{doc.inspect}"
-            create_event payload: payload.merge(doc)
-          end
-          return
-        end
+    def handle_data(body, url, existing_payload)
+      doc = parse(body)
 
-        output =
-          case extraction_type
+      if extract_full_json?
+        if store_payload!(previous_payloads(1), doc)
+          log "Storing new result for '#{name}': #{doc.inspect}"
+          create_event payload: existing_payload.merge(doc)
+        end
+        return
+      end
+
+      output =
+        case extraction_type
           when 'json'
             extract_json(doc)
           when 'text'
             extract_text(doc)
           else
             extract_xml(doc)
-          end
-
-        num_unique_lengths = interpolated['extract'].keys.map { |name| output[name].length }.uniq
-
-        if num_unique_lengths.length != 1
-          raise "Got an uneven number of matches for #{interpolated['name']}: #{interpolated['extract'].inspect}"
         end
 
-        old_events = previous_payloads num_unique_lengths.first
-        num_unique_lengths.first.times do |index|
-          result = {}
-          interpolated['extract'].keys.each do |name|
-            result[name] = output[name][index]
-            if name.to_s == 'url'
-              result[name] = (response.env[:url] + result[name]).to_s
-            end
-          end
+      num_unique_lengths = interpolated['extract'].keys.map { |name| output[name].length }.uniq
 
-          if store_payload!(old_events, result)
-            log "Storing new parsed result for '#{name}': #{result.inspect}"
-            create_event payload: payload.merge(result)
+      if num_unique_lengths.length != 1
+        raise "Got an uneven number of matches for #{interpolated['name']}: #{interpolated['extract'].inspect}"
+      end
+
+      old_events = previous_payloads num_unique_lengths.first
+      num_unique_lengths.first.times do |index|
+        result = {}
+        interpolated['extract'].keys.each do |name|
+          result[name] = output[name][index]
+          if name.to_s == 'url' && url.present?
+            result[name] = (url + Utils.normalize_uri(result[name])).to_s
           end
         end
-      }
-    rescue => e
-      error "Error when fetching url: #{e.message}\n#{e.backtrace.join("\n")}"
+
+        if store_payload!(old_events, result)
+          log "Storing new parsed result for '#{name}': #{result.inspect}"
+          create_event payload: existing_payload.merge(result)
+        end
+      end
     end
 
     def receive(incoming_events)
       incoming_events.each do |event|
         interpolate_with(event) do
-          url_to_scrape =
-            if url_template = options['url_from_event'].presence
-              interpolate_string(url_template)
+          existing_payload = interpolated['mode'].to_s == "merge" ? event.payload : {}
+
+          if data_from_event = options['data_from_event'].presence
+            data = interpolate_options(data_from_event)
+            if data.present?
+              handle_event_data(data, event, existing_payload)
             else
-              event.payload['url']
+              error "No data was found in the Event payload using the template #{data_from_event}", inbound_event: event
             end
-          check_url(url_to_scrape,
-                    interpolated['mode'].to_s == "merge" ? event.payload : {})
+          else
+            url_to_scrape =
+              if url_template = options['url_from_event'].presence
+                interpolate_options(url_template)
+              else
+                interpolated['url']
+              end
+            check_urls(url_to_scrape, existing_payload)
+          end
         end
       end
     end
 
     private
+    def consider_response_successful?(response)
+      response.success? || begin
+        consider_success = options["http_success_codes"]
+        consider_success.present? && (consider_success.include?(response.status.to_s) || consider_success.include?(response.status))
+      end
+    end
+
+    def handle_event_data(data, event, existing_payload)
+      handle_data(data, event.payload['url'], existing_payload)
+    rescue => e
+      error "Error when handling event data: #{e.message}\n#{e.backtrace.join("\n")}", inbound_event: event
+    end
 
     # This method returns true if the result should be stored as a new event.
     # If mode is set to 'on_change', this method may return false and update an existing
@@ -309,7 +427,7 @@ module Agents
       !interpolated['extract'].present? && extraction_type == "json"
     end
 
-    def extraction_type
+    def extraction_type(interpolated = interpolated())
       (interpolated['type'] || begin
         case interpolated['url']
         when /\.(rss|xml)$/i
@@ -351,9 +469,13 @@ module Agents
     def extract_text(doc)
       extract_each { |extraction_details|
         regexp = Regexp.new(extraction_details['regexp'])
+        case index = extraction_details['index']
+        when /\A\d+\z/
+          index = index.to_i
+        end
         result = []
         doc.scan(regexp) {
-          result << Regexp.last_match[extraction_details['index']]
+          result << Regexp.last_match[index]
         }
         log "Extracting #{extraction_type} at #{regexp}: #{result}"
         result
@@ -373,7 +495,14 @@ module Agents
         case nodes
         when Nokogiri::XML::NodeSet
           result = nodes.map { |node|
-            case value = node.xpath(extraction_details['value'])
+            value = node.xpath(extraction_details['value'] || '.')
+            if value.is_a?(Nokogiri::XML::NodeSet)
+              child = value.first
+              if child && child.cdata?
+                value = child.text
+              end
+            end
+            case value
             when Float
               # Node#xpath() returns any numeric value as float;
               # convert it to integer as appropriate.

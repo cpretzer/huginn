@@ -1,7 +1,6 @@
-require 'spec_helper'
+require 'rails_helper'
 
 describe JobsController do
-
   describe "GET index" do
     before do
       async_handler_yaml =
@@ -71,12 +70,40 @@ describe JobsController do
     before do
       @failed = Delayed::Job.create(failed_at: Time.now - 1.minute)
       @running = Delayed::Job.create(locked_at: Time.now, locked_by: 'test')
+      @pending = Delayed::Job.create
       sign_in users(:jane)
     end
 
     it "just destroy failed jobs" do
-      expect { delete :destroy_failed, id: @failed.id }.to change(Delayed::Job, :count).by(-1)
-      expect { delete :destroy_failed, id: @running.id }.to change(Delayed::Job, :count).by(0)
+      expect { delete :destroy_failed }.to change(Delayed::Job, :count).by(-1)
+    end
+  end
+
+  describe "DELETE destroy_all" do
+    before do
+      @failed = Delayed::Job.create(failed_at: Time.now - 1.minute)
+      @running = Delayed::Job.create(locked_at: Time.now, locked_by: 'test')
+      @pending = Delayed::Job.create
+      sign_in users(:jane)
+    end
+
+    it "destroys all jobs" do
+      expect { delete :destroy_all }.to change(Delayed::Job, :count).by(-2)
+      expect(Delayed::Job.find(@running.id)).to be
+    end
+  end
+
+  describe "POST retry_queued" do
+    before do
+      @not_running = Delayed::Job.create(run_at: Time.zone.now - 1.hour)
+      @not_running.update_attribute(:attempts, 1)
+      sign_in users(:jane)
+    end
+
+    it "run the queued job" do
+      expect(Delayed::Job.last.run_at.to_s).not_to eq(Time.zone.now.to_s)
+      post :retry_queued
+      expect(Delayed::Job.last.run_at.to_s).to eq(Time.zone.now.to_s)
     end
   end
 end

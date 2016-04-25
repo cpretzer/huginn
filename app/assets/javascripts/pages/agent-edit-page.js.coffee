@@ -16,6 +16,17 @@ class @AgentEditPage
     if $("#agent_type").length
       $("#agent_type").on "change", => @handleTypeChange(false)
       @handleTypeChange(true)
+
+      # Update the dropdown to match agent description as well as agent name
+      $('#agent_type').select2
+        width: 'resolve'
+        formatResult: formatAgentForSelect
+        escapeMarkup: (m) ->
+          m
+        matcher: (term, text, opt) ->
+          description = opt.attr('title')
+          text.toUpperCase().indexOf(term.toUpperCase()) >= 0 or description.toUpperCase().indexOf(term.toUpperCase()) >= 0
+
     else
       @enableDryRunButton()
       @buildAce()
@@ -148,7 +159,6 @@ class @AgentEditPage
         session.setTabSize(2)
         session.setUseSoftTabs(true)
         session.setUseWrapMode(false)
-        editor.setTheme("ace/theme/chrome")
 
         setSyntax = ->
           switch $("[name='agent[options][language]']").val()
@@ -176,6 +186,11 @@ class @AgentEditPage
     e.preventDefault()
     @updateFromEditors()
     Utils.handleDryRunButton(e.target)
+
+  formatAgentForSelect = (agent) ->
+    originalOption = agent.element
+    description = agent.element[0].title
+    '<strong>' + agent.text + '</strong><br/>' + description
 
 $ ->
   Utils.registerPage(AgentEditPage, forPathsMatching: /^agents/)
